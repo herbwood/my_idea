@@ -1,8 +1,8 @@
 import time
 import argparse
 
-from task.train_faster_rcnn import faster_rcnn_training
-from task.test_faster_rcnn import faster_rcnn_testing
+from train_faster_rcnn import faster_rcnn_training
+# from test_faster_rcnn import faster_rcnn_testing
 
 def main(args):
     # Time setting
@@ -11,8 +11,8 @@ def main(args):
     if args.model == 'faster_rcnn':
         if args.training:
             faster_rcnn_training(args)
-        else:
-            faster_rcnn_testing(args)
+        # else:
+        #     faster_rcnn_testing(args)
 
     elif args.model == 'retinanet':
         pass

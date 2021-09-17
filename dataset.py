@@ -51,6 +51,7 @@ class CrowdHumanDataset(Dataset):
         images = [it[0] for it in data]
         gt_boxes = [it[1] for it in data]
         im_info = np.array([it[2] for it in data])
+        print()
 
         # image height, width 
         batch_height = np.max(im_info[:, 3])
@@ -128,12 +129,31 @@ class CrowdHumanDataset(Dataset):
 
 
 if __name__ == "__main__":
+    from faster_rcnn import fasterrcnn_resnet50_fpn
+    from torch.optim import SGD, Adam, AdamW
+
     root_dir = "../dataset/crowd_human/"
     phase = 'train'
     transform = None
 
     crowdhuman = CrowdHumanDataset(root_dir, phase, transform)
-    loader = DataLoader(crowdhuman, drop_last=True, batch_size=2, 
+    dataloader = DataLoader(crowdhuman, drop_last=True, batch_size=2, 
                 shuffle=True, pin_memory=True, num_workers=2, collate_fn=crowdhuman.merge_batch)
-    print(len(loader))
+    print(len(dataloader))
+
+    model = model = fasterrcnn_resnet50_fpn(pretrained=False, progress=True, 
+                                    num_classes=2, pretrained_backbone=True, 
+                                    trainable_backbone_layers=None)
+    optimizer = SGD(filter(lambda p : p.requires_grad, model.parameters()), 0.01, momentum=0.9)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    train_loss = 0
+
+    for i, (data, target, im_info) in enumerate(dataloader):
+
+        optimizer.zero_grad()
+        data = data.to(device)
+        target = target.to(device)
+        losses, detections = model(data)
+
+        print(losses)
 
