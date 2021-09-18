@@ -1,131 +1,183 @@
+import torch
+from torch.utils.data import DataLoader
+
 import os
 import cv2
-import torch
-from torch.utils.data import Dataset
-from torch.utils.data import DataLoader
+import mmcv
 import numpy as np
+import pandas as pd
+import brambox
+from collections import defaultdict
 
-import dataset_utils
+from base_dataset import CustomDataset
 
-class CrowdHumanDataset(Dataset):
+# from .coco import CocoDataset
 
-    def __init__(self, root_dir, phase, transform, class_names=['background', 'person']):
-        
-        self.phase = phase
-        self.transform = transform
-        self.class_names = class_names
 
-        self.source = os.path.join(root_dir, f"annotation_{phase}.odgt")
-        self.image_dir = os.path.join(root_dir, 'Images')
+# @DATASETS.register_module()
+# class CrowdHumanDataset(CocoDataset):
+#     CLASSES = ('smth',)
 
-        self.records = dataset_utils.load_json_lines(self.source)
-    
-    def __len__(self):
-        return len(self.records)
+class CrowdHumanDataset(CustomDataset):
+    def load_annotations(self, ann_file):
+        data = mmcv.load(ann_file)
+        results = defaultdict(lambda: {'ann': defaultdict(list)})
+        image_data = {v['id']: v for v in data['images']}
+        for annotation in data['annotations']:
+            image_id = annotation['image_id']
+            results[image_id]['filename'] = image_data[image_id]['file_name']
+            results[image_id]['width'] = image_data[image_id]['width']
+            results[image_id]['height'] = image_data[image_id]['height']
+            bbox = annotation['bbox']
+            bbox = [bbox[0], bbox[1], bbox[0] + bbox[2], bbox[1] + bbox[3]]
+            results[image_id]['ann']['bboxes_ignore' if annotation['iscrowd'] else 'bboxes'].append(bbox)
+            results[image_id]['ann']['labels_ignore' if annotation['iscrowd'] else 'labels'].append(0)
+        results = list(results.values())
+        for annotation in results:
+            annotation['ann']['bboxes'] = np.array(annotation['ann']['bboxes'], dtype=np.float32)
+            if not len(annotation['ann']['bboxes']):
+                annotation['ann']['bboxes'] = np.zeros((0, 4), dtype=np.float32)
+            annotation['ann']['labels'] = np.array(annotation['ann']['labels'], dtype=np.int64)
+            annotation['ann']['bboxes_ignore'] = np.array(annotation['ann']['bboxes_ignore'], dtype=np.float32)
+            if not len(annotation['ann']['bboxes_ignore']):
+                annotation['ann']['bboxes_ignore'] = np.zeros((0, 4), dtype=np.float32)
+            annotation['ann']['labels_ignore'] = np.array(annotation['ann']['labels_ignore'], dtype=np.int64)
+        return results
 
-    def __getitem__(self, index):
-        return self._load_record(self.records[index])
 
-    def _load_record(self, record):
+    def evaluate(self,
+                 results,
+                 metric=None,
+                 logger=None,
+                 iou_thr=0.5):
+        # annotations to brambox
+        true_df = defaultdict(list)
+        for img_info in self.data_infos:
+            bboxes = np.concatenate((img_info['ann']['bboxes'], img_info['ann']['bboxes_ignore']), axis=0)
+            labels = np.concatenate((img_info['ann']['labels'], img_info['ann']['labels_ignore']), axis=0)
+            ignores = [False] * len(img_info['ann']['bboxes']) + [True] * len(img_info['ann']['bboxes_ignore'])
+            for bbox, label, ignore in zip(bboxes, labels, ignores):
+                true_df['image'].append(img_info['filename'])
+                true_df['class_label'].append(label)
+                true_df['id'].append(0)
+                true_df['x_top_left'].append(bbox[0])
+                true_df['y_top_left'].append(bbox[1])
+                true_df['width'].append(bbox[2] - bbox[0])
+                true_df['height'].append(bbox[3] - bbox[1])
+                true_df['ignore'].append(ignore)
+        true_df = pd.DataFrame(true_df)
+        true_df['image'] = true_df['image'].astype('category')
 
-        image_path = os.path.join(self.image_dir, record["ID"] + ".jpg")
-        image = dataset_utils.load_img(image_path)
-        h = image.shape[0]
-        w = image.shape[1]
+        # results to brambox
+        predicted_df = defaultdict(list)
+        for i, image_results in enumerate(results):
+            for j, class_detection in enumerate(image_results):
+                for detection in class_detection:
+                    predicted_df['image'].append(self.data_infos[i]['filename'])
+                    predicted_df['class_label'].append(j)
+                    predicted_df['id'].append(0)
+                    predicted_df['x_top_left'].append(detection[0])
+                    predicted_df['y_top_left'].append(detection[1])
+                    predicted_df['width'].append(detection[2] - detection[0])
+                    predicted_df['height'].append(detection[3] - detection[1])
+                    predicted_df['confidence'].append(detection[4])
+        predicted_df = pd.DataFrame(predicted_df)
+        predicted_df['image'] = predicted_df['image'].astype('category')
 
-        gtboxes = dataset_utils.load_gt(record, 'gtboxes', 'fbox', self.class_names)
-        keep = (gtboxes[:, 2] >= 0) * (gtboxes[:, 3] >= 0)
-        gtboxes = gtboxes[keep, :]
-        gtboxes[:, 2:4] += gtboxes[:, :2]
+        pr = brambox.stat.pr(predicted_df, true_df, iou_thr)
+        ap = brambox.stat.ap(pr)
+        mr_fppi = brambox.stat.mr_fppi(predicted_df, true_df, iou_thr)
+        lamr = brambox.stat.lamr(mr_fppi)
+        eval_results = {
+            'gts': len(true_df[~true_df['ignore']]),
+            'dets': len(predicted_df),
+            'recall': pr['recall'].values[-1],
+            'mAP': ap,
+            'mMR': lamr
+        }
+        print(str(eval_results), logger)
+        return eval_results
 
-        nb_gtboxes = gtboxes.shape[0]
+    # All functions below were used for paper visualizations.
+    # To use them again pass iteration number as a label in Detector, and then to predicted_df['iteration'].
+    # After this the can be called from self.evaluate.
+    def plot(self, true_df, predicted_df, iou_thr):
+        # update path here !
+        image = mmcv.imread(os.path.join('data', 'adaptis_toy_v2', 'test', self.data_infos[0]['filename']))
+        predicted_df.sort_values('confidence', ascending=False, inplace=True)
+        predicted_df.reset_index(inplace=True)
 
-        if self.transform is not None:
-            image = self.transform(image)
+        mmcv.imwrite(
+            self.draw_boxes(image, true_df[~true_df['ignore']], (25, 25, 255 - 25), 25, 2),
+            './work_dirs/true.png'
+        )
+        n_iterations = len(predicted_df['iteration'].value_counts())
+        print(predicted_df['iteration'].value_counts())
+        for iteration in range(n_iterations):
+            predicted_df['vis'] = 'fp'
+            true_df['used'] = False
+            ious = brambox.stat.coordinates.iou(predicted_df, true_df)
+            ioas = brambox.stat.coordinates.ioa(predicted_df, true_df)
+            for i in range(len(predicted_df)):
+                if predicted_df['iteration'][i] > iteration:
+                    continue
+                best_iou = -1
+                best_true = -1
+                for j in range(len(true_df)):
+                    if true_df['ignore'][j]:
+                        if ioas[i, j] > iou_thr:
+                            predicted_df.at[i, 'vis'] = 'ignore'
+                    else:
+                        if not true_df['used'][j] and ious[i, j] > iou_thr and ious[i, j] > best_iou:
+                            best_iou = ious[i, j]
+                            best_true = j
+                if best_iou > 0:
+                    predicted_df.at[i, 'vis'] = 'tp'
+                    true_df.at[best_true, 'used'] = True
+            print(predicted_df['vis'][predicted_df['iteration'] <= iteration].value_counts())
+            it_image = self.draw_boxes(image, predicted_df[
+                (predicted_df['iteration'] < iteration) &
+                (predicted_df['vis'] == 'tp')
+            ], (25, 145, 25), 25, 2)
+            color, width = ((105, 255 - 25, 255 - 25), 3) if iteration !=0 else ((25, 145, 25), 2)
+            it_image = self.draw_boxes(it_image, predicted_df[
+                (predicted_df['iteration'] == iteration) &
+                (predicted_df['vis'] == 'tp')
+                ], color, 25, width)
+            mmcv.imwrite(it_image, f'./work_dirs/predicted_{iteration}.png')
 
+
+    def draw_boxes(self, image, df, color, color_thr, width):
+        image = np.copy(image)
+        for row in df.itertuples():
+            cv2.rectangle(
+                image,
+                (max(int(row.x_top_left), 0), max(int(row.y_top_left), 0)),
+                (
+                    min(int(row.x_top_left + row.width), image.shape[1] - 1),
+                    min(int(row.y_top_left + row.height), image.shape[0] - 1)
+                ),
+                self.get_random_color(color, color_thr),
+                width,
+                cv2.LINE_8
+            )
         return image
-        
-    def merge_batch(self, data):
-        
-        # image
-        images = [it[0] for it in data]
-        gt_boxes = [it[1] for it in data]
-        im_info = np.array([it[2] for it in data])
-        print()
 
-        # image height, width 
-        batch_height = np.max(im_info[:, 3])
-        batch_width = np.max(im_info[:, 4])
+    def get_random_color(self, color, thr):
+        return np.clip(np.random.randint(-thr, thr, 3) + color, 0, 255).tolist()
 
-        # pad and resize images 
-        padded_images = [self.pad_image(im, batch_height, batch_width, self.config.image_mean) for im in images]
-        t_height, t_width, scale = self.target_size(batch_height, batch_width, self.short_size, self.max_size)
-        # INTER_CUBIC, INTER_LINEAR, INTER_NEAREST, INTER_AREA, INTER_LANCZOS4
-        resized_images = np.array([cv2.resize(
-                im, (t_width, t_height), interpolation=cv2.INTER_LINEAR) for im in padded_images])
-
-        resized_images = resized_images.transpose(0, 3, 1, 2)
-        images = torch.tensor(resized_images).float()
-
-        # ground_truth
-        ground_truth = []
-        for it in gt_boxes:
-            gt_padded = np.zeros((self.config.max_boxes_of_image, self.config.nr_box_dim))
-            it[:, 0:4] *= scale
-            max_box = min(self.config.max_boxes_of_image, len(it))
-
-            # scaled, padded된 gt box를 가져옴 
-            gt_padded[:max_box] = it[:max_box]
-            ground_truth.append(gt_padded)
-
-        ground_truth = torch.tensor(ground_truth).float()
-
-        # im_info
-        im_info[:, 0] = t_height
-        im_info[:, 1] = t_width
-        im_info[:, 2] = scale
-        im_info = torch.tensor(im_info)
-
-        # gt box의 수가 2 미만인 경우... 
-        if max(im_info[:, -1] < 2):
-            return None, None, None
-        else:
-            return images, ground_truth, im_info
-
-    def pad_image(img : np.ndarray, 
-            height : int, 
-            width : int, 
-            mean_value : np.ndarray):
-
-        o_h, o_w, _ = img.shape
-        margins = np.zeros(2, np.int32)
-
-        assert o_h <= height
-
-        margins[0] = height - o_h
-        img = cv2.copyMakeBorder(img, 0, margins[0], 0, 0, cv2.BORDER_CONSTANT, value=0)
-        img[o_h:, :, :] = mean_value
-
-        assert o_w <= width
-
-        margins[1] = width - o_w
-        img = cv2.copyMakeBorder(img, 0, 0, 0, margins[1], cv2.BORDER_CONSTANT, value=0)
-        img[:, o_w:, :] = mean_value
-
-        return img
-
-    def target_size(height, width, short_size, max_size):
-        # Rescale maintaing aspect ratio
-
-        im_size_min = np.min([height, width])
-        im_size_max = np.max([height, width])
-        scale = (short_size + 0.0) / im_size_min
-
-        if scale * im_size_max > max_size:
-            scale = (max_size + 0.0) / im_size_max
-        t_height, t_width = int(round(height * scale)), int(round(width * scale))
-
-        return t_height, t_width, scale
+    def print_statistics(self, results):
+        file_names = pd.unique(results['image'])
+        print('objects/image', len(results) / len(file_names))
+        counts = {0.3: 0, 0.4: 0, 0.5: 0, 0.6: 0}
+        for file_name in file_names:
+            df = results[results['image'] == file_name]
+            ious = brambox.stat.coordinates.iou(df, df)
+            for thr in counts.keys():
+                counts[thr] += (np.sum(ious > thr) - len(df)) / 2
+        for thr in counts.keys():
+            counts[thr] /= len(file_names)
+        print(counts)
 
 
 if __name__ == "__main__":
