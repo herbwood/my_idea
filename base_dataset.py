@@ -143,7 +143,8 @@ class CustomDataset(Dataset):
         if self.proposals is not None:
             results['proposals'] = self.proposals[idx]
         self.pre_pipeline(results)
-        return self.pipeline(results)
+        return results
+        # return self.pipeline(results)
 
     def prepare_test_img(self, idx):
         img_info = self.data_infos[idx]

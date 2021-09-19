@@ -3,7 +3,7 @@ from torch.utils.data import DataLoader
 
 import os
 import cv2
-import mmcv
+import mmcv_utils
 import numpy as np
 import pandas as pd
 import brambox
@@ -19,30 +19,59 @@ from base_dataset import CustomDataset
 #     CLASSES = ('smth',)
 
 class CrowdHumanDataset(CustomDataset):
+
     def load_annotations(self, ann_file):
-        data = mmcv.load(ann_file)
+        data = mmcv_utils.load(ann_file)
         results = defaultdict(lambda: {'ann': defaultdict(list)})
         image_data = {v['id']: v for v in data['images']}
+
         for annotation in data['annotations']:
             image_id = annotation['image_id']
             results[image_id]['filename'] = image_data[image_id]['file_name']
             results[image_id]['width'] = image_data[image_id]['width']
             results[image_id]['height'] = image_data[image_id]['height']
             bbox = annotation['bbox']
+
             bbox = [bbox[0], bbox[1], bbox[0] + bbox[2], bbox[1] + bbox[3]]
             results[image_id]['ann']['bboxes_ignore' if annotation['iscrowd'] else 'bboxes'].append(bbox)
             results[image_id]['ann']['labels_ignore' if annotation['iscrowd'] else 'labels'].append(0)
+
         results = list(results.values())
+
         for annotation in results:
             annotation['ann']['bboxes'] = np.array(annotation['ann']['bboxes'], dtype=np.float32)
             if not len(annotation['ann']['bboxes']):
                 annotation['ann']['bboxes'] = np.zeros((0, 4), dtype=np.float32)
+            
             annotation['ann']['labels'] = np.array(annotation['ann']['labels'], dtype=np.int64)
             annotation['ann']['bboxes_ignore'] = np.array(annotation['ann']['bboxes_ignore'], dtype=np.float32)
+
             if not len(annotation['ann']['bboxes_ignore']):
                 annotation['ann']['bboxes_ignore'] = np.zeros((0, 4), dtype=np.float32)
             annotation['ann']['labels_ignore'] = np.array(annotation['ann']['labels_ignore'], dtype=np.int64)
+
         return results
+
+    def merge_batch(self, data):
+        ## TODO 
+        # read images and save it to images list 
+
+        # read gt boxes and save it to gt_boxes list 
+
+        # get maximum batch height and width 
+
+        # pad images 
+
+        # get target image size 
+
+        # resize padded images
+        
+        # resize gt_boxes 
+         
+        # return results 
+         
+        pass 
+
 
 
     def evaluate(self,
@@ -188,24 +217,31 @@ if __name__ == "__main__":
     phase = 'train'
     transform = None
 
-    crowdhuman = CrowdHumanDataset(root_dir, phase, transform)
-    dataloader = DataLoader(crowdhuman, drop_last=True, batch_size=2, 
-                shuffle=True, pin_memory=True, num_workers=2, collate_fn=crowdhuman.merge_batch)
-    print(len(dataloader))
+    crowdhuman = CrowdHumanDataset(ann_file='annotation_full_train.json',
+                                   data_root="../dataset/crowd_human/",
+                                   classes=None,
+                                   test_mode=False,
+                                   pipeline=None)
+    # print(crowdhuman[0].keys())
 
-    model = model = fasterrcnn_resnet50_fpn(pretrained=False, progress=True, 
-                                    num_classes=2, pretrained_backbone=True, 
-                                    trainable_backbone_layers=None)
-    optimizer = SGD(filter(lambda p : p.requires_grad, model.parameters()), 0.01, momentum=0.9)
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    train_loss = 0
+    print(crowdhuman[0])
+    print(crowdhuman[0].keys())
 
-    for i, (data, target, im_info) in enumerate(dataloader):
+    # dataloader = DataLoader(crowdhuman, drop_last=True, batch_size=2, shuffle=True, pin_memory=True, 
+    #                         num_workers=2)
 
-        optimizer.zero_grad()
-        data = data.to(device)
-        target = target.to(device)
-        losses, detections = model(data)
+    # model = model = fasterrcnn_resnet50_fpn(pretrained=False, progress=True, 
+    #                                 num_classes=2, pretrained_backbone=True, 
+    #                                 trainable_backbone_layers=None)
+    # optimizer = SGD(filter(lambda p : p.requires_grad, model.parameters()), 0.01, momentum=0.9)
+    # device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    # train_loss = 0
 
-        print(losses)
+    # for i, (data, target, im_info) in enumerate(dataloader):
 
+    #     optimizer.zero_grad()
+    #     data = data.to(device)
+    #     target = target.to(device)
+    #     losses, detections = model(data)
+
+    #     print(losses)
