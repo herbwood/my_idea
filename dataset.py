@@ -54,16 +54,21 @@ class CrowdHumanDataset(CustomDataset):
 
     def merge_batch(self, data):
         ## TODO 
+        # change __getitem___ return values to img, gt, info(img height, width)
         # read images and save it to images list 
-
+        images = [img for (img, gt, info) in data]
         # read gt boxes and save it to gt_boxes list 
-
+        gt_boxes = [gt for (img, gt, info) in data]
+        # read infos and save it to infos list 
+        infos = [info for (img, gt, info) in data]
         # get maximum batch height and width 
-
+        height = max([info[0] for info in infos])
+        width = max([info[1] for info in infos])
         # pad images 
-
+        padded_images = [self.pad_image(img, height, width, 
+                        np.array([103.530, 116.280, 123.675]), np.array([57.375, 57.120, 58.395])) for img in images]
         # get target image size 
-
+        t_height, t_width, scale = self.target_size(height, width, 800, 1400, )
         # resize padded images
         
         # resize gt_boxes 
@@ -72,7 +77,30 @@ class CrowdHumanDataset(CustomDataset):
          
         pass 
 
+    def pad_image(img, height, width, mean_value):
+        o_h, o_w, _ = img.shape
+        margins = np.zeros(2, np.int32)
+        assert o_h <= height
+        margins[0] = height - o_h
+        img = cv2.copyMakeBorder(
+            img, 0, margins[0], 0, 0, cv2.BORDER_CONSTANT, value=0)
+        img[o_h:, :, :] = mean_value
+        assert o_w <= width
+        margins[1] = width - o_w
+        img = cv2.copyMakeBorder(
+            img, 0, 0, 0, margins[1], cv2.BORDER_CONSTANT, value=0)
+        img[:, o_w:, :] = mean_value
+        return img
 
+    def target_size(height, width, short_size, max_size):
+        im_size_min = np.min([height, width])
+        im_size_max = np.max([height, width])
+        scale = (short_size + 0.0) / im_size_min
+        if scale * im_size_max > max_size:
+            scale = (max_size + 0.0) / im_size_max
+        t_height, t_width = int(round(height * scale)), int(
+            round(width * scale))
+        return t_height, t_width, scale
 
     def evaluate(self,
                  results,
@@ -226,6 +254,7 @@ if __name__ == "__main__":
 
     print(crowdhuman[0])
     print(crowdhuman[0].keys())
+    print(crowdhuman[0]['img_info']['filename'])
 
     # dataloader = DataLoader(crowdhuman, drop_last=True, batch_size=2, shuffle=True, pin_memory=True, 
     #                         num_workers=2)
