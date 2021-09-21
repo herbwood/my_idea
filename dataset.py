@@ -70,12 +70,22 @@ class CrowdHumanDataset(CustomDataset):
         # get target image size 
         t_height, t_width, scale = self.target_size(height, width, 800, 1400, )
         # resize padded images
-        
+        resized_images = np.array([cv2.resize(
+            img, (t_width, t_height), interpolation=cv2.INTER_LINEAR) for img in padded_images])
+        resized_imgeas = resized_images.transpose(0, 3, 1, 2)
+        images = torch.tensor(resized_images).float()
         # resize gt_boxes 
-         
-        # return results 
-         
-        pass 
+        ground_truth = []
+
+        for it in gt_boxes:
+            gt_padded = np.zeros((500, 5))
+            it[:, 0:4] *= scale
+            max_box = min(500, len(it))
+            gt_padded[:max_box] = it[:max_box]
+            ground_truth.append(gt_padded)
+        ground_truth = torch.tensor(ground_truth).float()
+
+        return images, ground_truth
 
     def pad_image(img, height, width, mean_value):
         o_h, o_w, _ = img.shape
